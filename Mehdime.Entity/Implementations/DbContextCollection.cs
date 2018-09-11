@@ -36,10 +36,11 @@ namespace Mehdime.Entity
         private bool _disposed;
         private bool _completed;
         private bool _readOnly;
+        private readonly Type _defaultDbContextType;
 
         internal Dictionary<Type, DbContext> InitializedDbContexts { get { return _initializedDbContexts; } }
 
-        public DbContextCollection(bool readOnly = false, IsolationLevel? isolationLevel = null, IDbContextFactory dbContextFactory = null)
+        public DbContextCollection(bool readOnly = false, IsolationLevel? isolationLevel = null, IDbContextFactory dbContextFactory = null, Type defaultDbContextType = null)
         {
             _disposed = false;
             _completed = false;
@@ -50,6 +51,38 @@ namespace Mehdime.Entity
             _readOnly = readOnly;
             _isolationLevel = isolationLevel;
             _dbContextFactory = dbContextFactory;
+            _defaultDbContextType = defaultDbContextType;
+        }
+
+        private DbContext Get(Type requestedType)
+        {
+            if (_disposed)
+                throw new ObjectDisposedException("DbContextCollection");
+
+            if (!_initializedDbContexts.ContainsKey(requestedType))
+            {
+                // First time we've been asked for this particular DbContext type.
+                // Create one, cache it and start its database transaction if needed.
+                var dbContext = _dbContextFactory != null
+                    ? _dbContextFactory.GetType().GetMethod("CreateDbContext").MakeGenericMethod(requestedType).Invoke(_dbContextFactory, null) as DbContext
+                    : Activator.CreateInstance(requestedType) as DbContext;
+
+                _initializedDbContexts.Add(requestedType, dbContext);
+
+                if (_readOnly)
+                {
+                    dbContext.Configuration.AutoDetectChangesEnabled = false;
+                }
+
+                if (_isolationLevel.HasValue)
+                {
+                    var tran = dbContext.Database.BeginTransaction(_isolationLevel.Value);
+                    _transactions.Add(dbContext, tran);
+                }
+            }
+
+            return _initializedDbContexts[requestedType] as DbContext;
+
         }
 
         public TDbContext Get<TDbContext>() where TDbContext : DbContext
@@ -82,6 +115,16 @@ namespace Mehdime.Entity
             }
 
             return _initializedDbContexts[requestedType]  as TDbContext;
+        }
+
+        public DbSet<TEntity> GetDbSet<TDbContext, TEntity>() where TDbContext : DbContext where TEntity : class
+        {
+            return Get<TDbContext>().Set<TEntity>();
+        }
+
+        public DbSet<TEntity> GetDbSet<TEntity>() where TEntity : class
+        {
+            return Get(_defaultDbContextType).Set<TEntity>();
         }
 
         public int Commit()
